@@ -1,0 +1,10 @@
+# secrets
+*.env
+/etc/janu/*
+/var/lib/janu/*
+/var/backups/*
+# node/php vendor
+node_modules/
+vendor/
+# logs
+*.log
