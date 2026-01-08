@@ -41,3 +41,6 @@ build/
 .next/
 # ---- JANU: local / server runtime dirs ----
 /.githooks/
+# ---- JANU packs backups ----
+packs/.bk_*/
+packs/.bk_*
