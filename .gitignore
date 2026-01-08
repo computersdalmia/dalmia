@@ -20,3 +20,24 @@ janu.env
 **/node_modules/
 **/__pycache__/
 **/*.pyc
+
+# ---- JANU: always ignore backups/artifacts ----
+*.bak
+*.bak_*
+*.tmp
+*.swp
+*.swo
+*.old
+*.orig
+*.rej
+*.sql
+*.dump
+# ---- JANU: env/secrets ----
+/etc/janu/
+# ---- JANU: node/python caches ----
+# ---- JANU: build outputs ----
+dist/
+build/
+.next/
+# ---- JANU: local / server runtime dirs ----
+/.githooks/
