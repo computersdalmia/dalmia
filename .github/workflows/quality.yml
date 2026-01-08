@@ -1,0 +1,32 @@
+name: Quality
+on:
+  push:
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install deps
+        run: npm ci || npm install
+
+      - name: Prettier check (diff only)
+        run: npx prettier -c .
+
+      - name: ESLint
+        run: npx eslint .
+
+      - name: Stylelint
+        run: npx stylelint "**/*.{css,scss}"
+
+      - name: Shellcheck (only if shell files exist)
+        run: |
+          shopt -s globstar nullglob
+          files=(**/*.sh)
+          if [ ${#files[@]} -gt 0 ]; then shellcheck "${files[@]}"; else echo "no sh files"; fi

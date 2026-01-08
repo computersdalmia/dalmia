@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+set -euo pipefail
+set +H
+
+TS="$(date +%F_%H%M%S)"
+BK="/var/backups/janu/DB_FIX_${TS}"
+mkdir -p "$BK"; chmod 700 "$BK"
+echo "BK: $BK"
+
+echo "== 0) Hard stop MariaDB + kill leftovers =="
+systemctl stop mariadb 2>/dev/null || true
+pkill -9 -x mariadbd 2>/dev/null || true
+pkill -9 -x mysqld   2>/dev/null || true
+pkill -9 -f mysqld_safe 2>/dev/null || true
+sleep 2
+
+echo "== 1) Runtime dirs clean =="
+mkdir -p /run/mysqld
+chown mysql:mysql /run/mysqld
+chmod 755 /run/mysqld
+rm -f /run/mysqld/mysqld.sock /run/mysqld/mysqld.pid 2>/dev/null || true
+rm -f /tmp/janu.sock /tmp/janu.pid /tmp/janu.err 2>/dev/null || true
+
+echo "== 2) Backup important mysql files (safe copies) =="
+cp -a /etc/mysql  "$BK/etc_mysql" 2>/dev/null || true
+cp -a /var/lib/mysql/mysql "$BK/mysql_system_db" 2>/dev/null || true
+
+echo "== 3) Start TEMP mariadbd (skip grants, socket-only) =="
+sudo -u mysql /usr/sbin/mariadbd \
+  --no-defaults \
+  --datadir=/var/lib/mysql \
+  --skip-grant-tables \
+  --skip-networking \
+  --port=0 \
+  --socket=/tmp/janu.sock \
+  --pid-file=/tmp/janu.pid \
+  --log-error=/tmp/janu.err \
+  >/dev/null 2>&1 &
+
+for i in $(seq 1 60); do [ -S /tmp/janu.sock ] && break; sleep 1; done
+if [ ! -S /tmp/janu.sock ]; then
+  echo "FAIL: temp socket not created"
+  tail -n 200 /tmp/janu.err || true
+  exit 1
+fi
+
+SQL="mariadb --no-defaults --protocol=socket --socket=/tmp/janu.sock -uroot"
+
+echo "== 4) Ensure mysql.global_priv exists =="
+HAS="$($SQL -Nse "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=mysql AND TABLE_NAME=global_priv;")"
+if [ "$HAS" != "1" ]; then
+  echo "FAIL: mysql.global_priv missing (cannot repair safely)."
+  exit 1
+fi
+
+echo "== 5) Rebuild ROOT as real SUPERUSER via JSON (permanent) =="
+# FULL privileges bitmask = 18446744073709551615 (all bits)
+$SQL -e "
+FLUSH PRIVILEGES;
+
+INSERT INTO mysql.global_priv (Host,User,Priv) VALUES
+(localhost,root,{})
+ON DUPLICATE KEY UPDATE Priv=Priv;
+
+UPDATE mysql.global_priv
+SET Priv = JSON_SET(
+  COALESCE(Priv,{}),
+  $.plugin,unix_socket,
+  $.authentication_string,,
+  $.access, CAST(18446744073709551615 AS UNSIGNED),
+  $.account_locked, false
+)
+WHERE Host=localhost AND User=root;
+
+FLUSH PRIVILEGES;
+"
+
+echo "== 6) Recreate debian-sys-maint + write fresh /etc/mysql/debian.cnf =="
+PASS="$(tr -dc A-Za-z0-9 </dev/urandom | head -c 32)"
+echo "$PASS" > "$BK/debian_sys_maint_pass.txt"
+chmod 600 "$BK/debian_sys_maint_pass.txt"
+
+$SQL -e "
+FLUSH PRIVILEGES;
+
+INSERT INTO mysql.global_priv (Host,User,Priv) VALUES
+(localhost,debian-sys-maint,{})
+ON DUPLICATE KEY UPDATE Priv=Priv;
+
+SET @p := ;
+SET @h := PASSWORD(@p);
+
+UPDATE mysql.global_priv
+SET Priv = JSON_SET(
+  COALESCE(Priv,{}),
+  $.plugin,mysql_native_password,
+  $.authentication_string, @h,
+  $.access, CAST(18446744073709551615 AS UNSIGNED),
+  $.account_locked, false
+)
+WHERE Host=localhost AND User=debian-sys-maint;
+
+FLUSH PRIVILEGES;
+"
+
+cat > /etc/mysql/debian.cnf <<EOF
+[client]
+host     = localhost
+user     = debian-sys-maint
+password = $PASS
+socket   = /run/mysqld/mysqld.sock
+
+[mysql]
+host     = localhost
+user     = debian-sys-maint
+password = $PASS
+socket   = /run/mysqld/mysqld.sock
+
+[mariadb]
+host     = localhost
+user     = debian-sys-maint
+password = $PASS
+socket   = /run/mysqld/mysqld.sock
+EOF
+chmod 600 /etc/mysql/debian.cnf
+
+echo "== 7) Shutdown TEMP server =="
+mariadb-admin --no-defaults --protocol=socket --socket=/tmp/janu.sock -uroot shutdown || true
+sleep 2
+rm -f /tmp/janu.sock /tmp/janu.pid 2>/dev/null || true
+
+echo "== 8) Start normal MariaDB =="
+systemctl start mariadb
+sleep 2
+
+echo "== 9) Verify maint user (must show debian-sys-maint) =="
+mariadb --defaults-extra-file=/etc/mysql/debian.cnf --protocol=socket -e "SELECT maint_ok s, CURRENT_USER() cu, VERSION() v;" | cat
+
+echo "== 10) Verify root SUPERUSER (must allow CREATE USER) =="
+sudo mariadb --protocol=socket -uroot -e "SELECT root_ok s, CURRENT_USER() cu;" | cat
+
+echo "== 11) Create/Reset janu_app user + grant dalmia_core =="
+read -rsp "Set password for janu_app (will not be echoed): " APPPASS; echo
+[ -n "$APPPASS" ] || { echo "FAIL: empty password"; exit 1; }
+
+sudo mariadb --protocol=socket -uroot -e "
+CREATE USER IF NOT EXISTS janu_app@localhost IDENTIFIED BY ;
+ALTER USER janu_app@localhost IDENTIFIED BY ;
+GRANT ALL PRIVILEGES ON dalmia_core.* TO janu_app@localhost;
+FLUSH PRIVILEGES;
+SHOW GRANTS FOR janu_app@localhost;
+" | cat
+
+echo "DONE ✅ DB fixed permanently. BK: $BK"

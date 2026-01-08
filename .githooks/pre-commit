@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+fail(){ echo "BLOCKED: $*" >&2; exit 1; }
+
+# gate: bash syntax must pass for *.sh in these locations
+targets=()
+[ -d /usr/local/bin ] && targets+=(/usr/local/bin)
+[ -d /opt/janu-packs/dalmia/packs ] && targets+=(/opt/janu-packs/dalmia/packs)
+
+for d in "${targets[@]}"; do
+  while IFS= read -r f; do
+    bash -n "$f" >/dev/null 2>&1 || fail "bash -n failed: $f"
+  done < <(find "$d" -type f -name "*.sh" 2>/dev/null)
+done
+
+exit 0

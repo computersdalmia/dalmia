@@ -1,0 +1,11 @@
+type(scope): short summary
+
+Why:
+- 
+
+What changed:
+- 
+
+Checklist:
+- [ ] tested
+- [ ] janu-nightly clean
