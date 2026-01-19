@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SHAHZADI ALL v3 — Paste-safe Live Audit (NO secret leaks)
+# SHAHZADI ALL v4 — TITAN Diagnostic Engine (No secret leaks)
 set -Eeuo pipefail
 set +H
 umask 022
@@ -21,10 +21,9 @@ kv(){ printf -- "- **%s:** %s\n" "$1" "$2"; }
 cmd_exists(){ command -v "$1" >/dev/null 2>&1; }
 sh_try(){ bash -lc "$1" >>"$TMP" 2>>"$ERR" || true; }
 
-# Non-fatal errors should not kill whole report
-trap 'echo; echo "NOTE: Some checks failed (non-fatal). See: '"$ERR"'" >>"'"$TMP"'"' ERR
+trap 'echo; echo "NOTE: Non-fatal errors logged: '"$ERR"'" >>"'"$TMP"'"' ERR
 
-# Guess app roots
+# ---------- ROOT DETECTION ----------
 APPROOT=""
 for p in "/var/www/dalmia" "/var/www/janu" "/var/www/html" "/var/www" "/root/amit" "/root/Janu" "/var/amit" "/srv" "/opt"; do
   [ -d "$p" ] || continue
@@ -38,8 +37,9 @@ for p in "/var/www/dalmia/public" "/var/www/janu/public" "/var/www/html" "/var/w
   [ -d "$p" ] && { PUBROOT="$p"; break; }
 done
 
+# ---------- HEADER ----------
 {
-  echo "# SHAHZADI ALL — Project JANU Live Audit (v3)"
+  echo "# SHAHZADI ALL — Project JANU Live Audit (v4)"
   echo
   kv "Generated" "$TS"
   kv "Hostname" "$(hostname 2>/dev/null || true)"
@@ -51,12 +51,15 @@ done
   kv "PUBROOT guess" "${PUBROOT:-NOT_FOUND}"
 } >>"$TMP"
 
+# ---------- CORE STACK ----------
 sec "Core services" >>"$TMP"
 {
   kv "nginx installed" "$(cmd_exists nginx && echo YES || echo NO)"
   kv "nginx active" "$(systemctl is-active nginx 2>/dev/null || echo NO)"
   kv "php installed" "$(cmd_exists php && echo YES || echo NO)"
+  kv "php version" "$(php -v 2>/dev/null | head -n1 || echo NA)"
   kv "php-fpm units" "$(systemctl list-units --type=service 2>/dev/null | awk "/php.*fpm/ {c++} END{print (c?c:0)}")"
+  kv "php-fpm socket" "$(ls /run/php/php*-fpm.sock 2>/dev/null | head -n1 || echo NOT_FOUND)"
   if cmd_exists mariadb || cmd_exists mysql; then
     kv "mariadb/mysql installed" "YES"
   else
@@ -65,6 +68,7 @@ sec "Core services" >>"$TMP"
   kv "mariadb/mysql active" "$(systemctl is-active mariadb 2>/dev/null || systemctl is-active mysql 2>/dev/null || echo NO)"
 } >>"$TMP"
 
+# ---------- NGINX DEEP SCAN ----------
 sec "Nginx sites enabled" >>"$TMP"
 if [ -d /etc/nginx/sites-enabled ]; then
   sh_try 'ls -la /etc/nginx/sites-enabled 2>/dev/null | sed "s/^/- /"'
@@ -72,6 +76,26 @@ else
   echo "- /etc/nginx/sites-enabled not found" >>"$TMP"
 fi
 
+sec "Nginx vhost analysis (dalmia)" >>"$TMP"
+if [ -f /etc/nginx/sites-available/dalmia ]; then
+  sh_try 'echo "- server_name:"; grep -R "server_name" /etc/nginx/sites-available/dalmia'
+  sh_try 'echo "- root:"; grep -R "root " /etc/nginx/sites-available/dalmia'
+  sh_try 'echo "- ssl:"; grep -R "ssl_certificate" /etc/nginx/sites-available/dalmia'
+  sh_try 'echo "- php socket:"; grep -R "fastcgi_pass" /etc/nginx/sites-available/dalmia'
+else
+  echo "- /etc/nginx/sites-available/dalmia not found" >>"$TMP"
+fi
+
+# ---------- SSL CHECK ----------
+sec "SSL certificate status" >>"$TMP"
+if cmd_exists openssl; then
+  echo | openssl s_client -servername dalmiacomputers.in -connect dalmiacomputers.in:443 2>/dev/null \
+    | openssl x509 -noout -dates 2>/dev/null >>"$TMP" || echo "- SSL check failed" >>"$TMP"
+else
+  echo "- openssl not installed" >>"$TMP"
+fi
+
+# ---------- DOMAIN ----------
 sec "Domains quick check (HTTP codes)" >>"$TMP"
 if cmd_exists curl; then
   for d in "dalmiacomputers.in" "www.dalmiacomputers.in"; do
@@ -82,6 +106,7 @@ else
   echo "- curl not installed (skip)" >>"$TMP"
 fi
 
+# ---------- ENV + KEYS ----------
 sec "Key files presence (no secrets printed)" >>"$TMP"
 CANDS=()
 for f in "${APPROOT}/.env" "${APPROOT}/app/.env" "${APPROOT}/config/.env" "/etc/janu/janu.env" "/var/www/dalmia/.env" "/var/www/.env"; do
@@ -123,6 +148,7 @@ else
   echo "- No env vars to detect integrations." >>"$TMP"
 fi
 
+# ---------- DATABASE ----------
 sec "Database quick check (safe, names only)" >>"$TMP"
 if cmd_exists mysql || cmd_exists mariadb; then
   echo "- Databases (names only):" >>"$TMP"
@@ -131,6 +157,27 @@ else
   echo "- mysql/mariadb not installed." >>"$TMP"
 fi
 
+# ---------- GIT ----------
+sec "Git revision (APPROOT)" >>"$TMP"
+if [ -d "${APPROOT}/.git" ]; then
+  sh_try "cd '${APPROOT}' && git rev-parse --short HEAD"
+  sh_try "cd '${APPROOT}' && git status --porcelain"
+else
+  echo "- APPROOT not a git repo" >>"$TMP"
+fi
+
+# ---------- AUTOMATION ----------
+sec "Cron + systemd timers" >>"$TMP"
+sh_try "crontab -l"
+sh_try "systemctl list-timers --all | head -n 30"
+
+# ---------- JANU MODULE DETECT ----------
+sec "JANU module folders (heuristic)" >>"$TMP"
+for d in "crm" "jobsheet" "kachcha_khata" "battery_advisor" "processor_advisor" "competitor_ai" "knowledge" "cinema" "geography" "referral" "contest"; do
+  [ -d \"${APPROOT}/app/${d}\" ] && echo \"- FOUND: ${d}\" >>\"$TMP\"
+done
+
+# ---------- FINAL ----------
 sec "Finalize" >>"$TMP"
 echo "- Report saved to: $OUT" >>"$TMP"
 [ -s "$ERR" ] && echo "- Non-fatal errors logged: $ERR" >>"$TMP"
